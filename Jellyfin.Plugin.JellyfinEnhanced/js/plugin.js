@@ -5,52 +5,10 @@
     // Create the global namespace immediately with placeholders
     window.JellyfinEnhanced = {
         pluginConfig: {},
-        userConfig: { settings: {}, shortcuts: { Shortcuts: [] }, bookmarks: { Bookmarks: {} }, elsewhere: {} },
+        userConfig: { settings: {} },
         translations: {},
         pluginVersion: 'unknown',
-        state: {
-            activeShortcuts: {},
-            currentContextItemId: null,
-            isContinueWatchingContext: false,
-            skipToastShown: false,
-            pauseScreenClickTimer: null
-         },
-        // Unified cache manager for tag systems
-        _cacheManager: {
-            callbacks: new Set(),
-            dirty: false,
-            scheduleId: null,
-            register(saveCallback) {
-                this.callbacks.add(saveCallback);
-            },
-            unregister(saveCallback) {
-                this.callbacks.delete(saveCallback);
-            },
-            markDirty() {
-                this.dirty = true;
-                if (!this.scheduleId) {
-                    // Use requestIdleCallback to defer cache saves
-                    if (typeof requestIdleCallback !== 'undefined') {
-                        this.scheduleId = requestIdleCallback(() => this._flush(), { timeout: 5000 });
-                    } else {
-                        this.scheduleId = setTimeout(() => this._flush(), 1000);
-                    }
-                }
-            },
-            _flush() {
-                if (this.dirty) {
-                    this.callbacks.forEach(cb => {
-                        try { cb(); } catch (e) { console.error('Cache save error:', e); }
-                    });
-                    this.dirty = false;
-                }
-                this.scheduleId = null;
-            },
-            forceSave() {
-                this.dirty = true;
-                this._flush();
-            }
-        },
+        state: {},
         // Placeholder functions
         t: (key, params = {}) => { // Actual implementation defined later
             const translations = window.JellyfinEnhanced?.translations || {};
@@ -63,7 +21,6 @@
             return text;
         },
         loadSettings: () => { console.warn("🪼 Jellyfin Enhanced: loadSettings called before config.js loaded"); return {}; },
-        initializeShortcuts: () => { console.warn("🪼 Jellyfin Enhanced: initializeShortcuts called before config.js loaded"); },
         saveUserSettings: async (fileName) => { console.warn(`🪼 Jellyfin Enhanced: saveUserSettings(${fileName}) called before config.js loaded`); }
     };
 
@@ -86,23 +43,6 @@
             }
         }
         return camelCased;
-    }
-
-    /**
-     * Injects Druidblack metadata icons CSS.
-     * @param {boolean} enabled
-     */
-    function injectMetadataIcons(enabled) {
-        const existing = document.getElementById('metadataIconsCss');
-        if (enabled && !existing) {
-            const link = document.createElement('link');
-            link.id = 'metadataIconsCss';
-            link.rel = 'stylesheet';
-            link.href = 'https://cdn.jsdelivr.net/gh/Druidblack/jellyfin-icon-metadata/public-icon.css';
-            document.head.appendChild(link);
-        } else if (!enabled && existing) {
-            existing.remove();
-        }
     }
 
     /**
@@ -343,32 +283,13 @@
         return Promise.allSettled(promises);
     }
 
-     /**
-     * Loads the splash screen script early.
-     */
-     function loadSplashScreenEarly() {
-        if (typeof ApiClient === 'undefined') {
-            setTimeout(loadSplashScreenEarly, 50);
-            return;
-        }
-        const splashScript = document.createElement('script');
-        splashScript.src = ApiClient.getUrl('/JellyfinEnhanced/js/splashscreen.js?v=' + Date.now());
-        splashScript.onload = () => {
-            if (typeof JE.initializeSplashScreen === 'function') {
-                JE.initializeSplashScreen(); // Initialize if available
-            }
-        };
-         splashScript.onerror = () => console.error('🪼 Jellyfin Enhanced: Failed to load splash screen script.');
-        document.head.appendChild(splashScript);
-    }
-
     /**
      * Main initialization function.
      */
     async function initialize() {
         // Ensure ApiClient exists and user is logged in
         if (typeof ApiClient === 'undefined' || !ApiClient.getCurrentUserId?.()) {
-            setTimeout(initialize, 300); // Increased retry delay slightly
+            setTimeout(initialize, 300);
             return;
         }
 
@@ -385,151 +306,52 @@
             JE.t = window.JellyfinEnhanced.t; // Ensure the real function is assigned
             await loadPrivateConfig();
 
-            // Inject metadata icons CSS if enabled
-            try {
-                injectMetadataIcons(!!JE.pluginConfig?.MetadataIconsEnabled);
-            } catch (e) {
-                console.warn('🪼 Jellyfin Enhanced: Failed to inject Metadata icons CSS', e);
-            }
-
             // Stage 2: Fetch user-specific settings
             const userId = ApiClient.getCurrentUserId();
 
-            const fetchPromises = [
-                ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl(`/JellyfinEnhanced/user-settings/${userId}/settings.json`), dataType: 'json' })
-                         .then(data => ({ name: 'settings', status: 'fulfilled', value: data }))
-                         .catch(e => ({ name: 'settings', status: 'rejected', reason: e })),
-                ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl(`/JellyfinEnhanced/user-settings/${userId}/shortcuts.json`), dataType: 'json' })
-                         .then(data => ({ name: 'shortcuts', status: 'fulfilled', value: data }))
-                         .catch(e => ({ name: 'shortcuts', status: 'rejected', reason: e })),
-                ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl(`/JellyfinEnhanced/user-settings/${userId}/bookmarks.json`), dataType: 'json' })
-                         .then(data => ({ name: 'bookmarks', status: 'fulfilled', value: data }))
-                         .catch(e => ({ name: 'bookmarks', status: 'rejected', reason: e })),
-                ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl(`/JellyfinEnhanced/user-settings/${userId}/elsewhere.json`), dataType: 'json' })
-                         .then(data => ({ name: 'elsewhere', status: 'fulfilled', value: data }))
-                         .catch(e => ({ name: 'elsewhere', status: 'rejected', reason: e }))
-            ];
-            // Use allSettled to get results even if some fetches fail
-            const results = await Promise.allSettled(fetchPromises);
-
-            JE.userConfig = { settings: {}, shortcuts: { Shortcuts: [] }, bookmarks: { Bookmarks: {} }, elsewhere: {} };
-            results.forEach(result => {
-                if (result.status === 'fulfilled' && result.value) {
-                    const data = result.value;
-                    if (data.status === 'fulfilled' && data.value && typeof data.value === 'object') {
-                        // *** CONVERT PASCALCASE TO CAMELCASE ***
-                        if (data.name === 'settings') {
-                            JE.userConfig[data.name] = toCamelCase(data.value);
-                        } else {
-                            JE.userConfig[data.name] = data.value;
-                        }
-                    } else if (data.status === 'rejected') {
-                        if (data.name === 'shortcuts') JE.userConfig.shortcuts = { Shortcuts: [] };
-                        else if (data.name === 'bookmarks') JE.userConfig.bookmarks = { Bookmarks: {} };
-                        else if (data.name === 'elsewhere') JE.userConfig.elsewhere = {};
-                        else JE.userConfig[data.name] = {};
-                    } else {
-                        if (data.name === 'shortcuts') JE.userConfig.shortcuts = { Shortcuts: [] };
-                        else if (data.name === 'bookmarks') JE.userConfig.bookmarks = { Bookmarks: {} };
-                        else if (data.name === 'elsewhere') JE.userConfig.elsewhere = {};
-                        else JE.userConfig[data.name] = {};
-                    }
-                } else {
-                    const name = result.value?.name || result.reason?.name || '';
-                    if (name === 'shortcuts') JE.userConfig.shortcuts = { Shortcuts: [] };
-                    else if (name === 'bookmarks') JE.userConfig.bookmarks = { Bookmarks: {} };
-                    else if (name === 'elsewhere') JE.userConfig.elsewhere = {};
-                    else if (name) JE.userConfig[name] = {};
-                }
-            });
-            // console.log('🪼 Jellyfin Enhanced: User configuration FETCHED (Raw Results):', JSON.stringify(JE.userConfig));
-
-
-            // Initialize splash screen
-            if (typeof JE.initializeSplashScreen === 'function') {
-                JE.initializeSplashScreen();
+            try {
+                const settingsData = await ApiClient.ajax({ 
+                    type: 'GET', 
+                    url: ApiClient.getUrl(`/JellyfinEnhanced/user-settings/${userId}/settings.json`), 
+                    dataType: 'json' 
+                });
+                JE.userConfig.settings = toCamelCase(settingsData || {});
+            } catch (e) {
+                JE.userConfig.settings = {};
             }
 
-            // Stage 3: Load ALL component scripts
+            // Stage 3: Load core component scripts
             const basePath = '/JellyfinEnhanced/js';
-            const allComponentScripts = [
+            const coreScripts = [
                 'enhanced/helpers.js',
-                'enhanced/config.js', 'enhanced/themer.js', 'enhanced/subtitles.js', 'enhanced/ui.js',
-                'enhanced/playback.js', 'enhanced/features.js', 'enhanced/events.js', 'enhanced/osd-rating.js',
-                'migrate.js',
-                'elsewhere.js',
-                'jellyseerr/api.js',
-                'jellyseerr/modal.js',
-                'jellyseerr/ui.js',
-                'jellyseerr/issue-reporter.js',
-                'jellyseerr/item-details.js',
-                'jellyseerr/jellyseerr.js',
-                'pausescreen.js', 'reviews.js',
-                'qualitytags.js', 'genretags.js', 'languagetags.js', 'ratingtags.js', 'arr-links.js', 'arr-tag-links.js',
-                'letterboxd-links.js'
+                'enhanced/config.js',
+                'enhanced/playback.js',
+                'enhanced/events.js'
             ];
-            await loadScripts(allComponentScripts, basePath);
-            console.log('🪼 Jellyfin Enhanced: All component scripts loaded.');
+            await loadScripts(coreScripts, basePath);
+            console.log('🪼 Jellyfin Enhanced: Core scripts loaded.');
 
-            // Stage 4: Initialize core settings/shortcuts using potentially defined functions
-            if (typeof JE.loadSettings === 'function' && typeof JE.initializeShortcuts === 'function') {
-                JE.currentSettings = JE.loadSettings(); // This happens AFTER config.js is loaded
-                JE.initializeShortcuts();
-                // console.log('🪼 Jellyfin Enhanced: Settings MERGED post-load:', JSON.stringify(JE.currentSettings));
-                // console.log('🪼 Jellyfin Enhanced: Shortcuts MERGED post-load:', JSON.stringify(JE.state?.activeShortcuts || {}));
+            // Stage 4: Initialize settings
+            if (typeof JE.loadSettings === 'function') {
+                JE.currentSettings = JE.loadSettings();
             } else {
-                 console.error("🪼 Jellyfin Enhanced: FATAL - config.js functions not defined after script loading.");
-                 if (typeof JE.hideSplashScreen === 'function') JE.hideSplashScreen();
-                 return;
+                console.error("🪼 Jellyfin Enhanced: FATAL - config.js functions not defined after script loading.");
+                return;
             }
 
-            // Stage 5: Initialize theme system first
-            if (typeof JE.themer?.init === 'function') {
-                JE.themer.init();
-                console.log('🪼 Jellyfin Enhanced: Theme system initialized.');
+            // Stage 5: Initialize feature
+            if (typeof JE.initializeEnhancedScript === 'function') {
+                JE.initializeEnhancedScript();
             }
 
-            // Register unified cache save on page unload
-            window.addEventListener('beforeunload', () => {
-                JE._cacheManager.forceSave();
-            });
-
-            // Stage 6: Initialize feature modules
-            if (typeof JE.initializeEnhancedScript === 'function') JE.initializeEnhancedScript();
-            if (typeof JE.initializeMigration === 'function') JE.initializeMigration();
-            if (typeof JE.initializeElsewhereScript === 'function' && JE.pluginConfig?.ElsewhereEnabled) JE.initializeElsewhereScript();
-            if (typeof JE.initializeJellyseerrScript === 'function' && JE.pluginConfig?.JellyseerrEnabled) JE.initializeJellyseerrScript();
-            if (typeof JE.jellyseerrIssueReporter?.initialize === 'function' && JE.pluginConfig?.JellyseerrEnabled) JE.jellyseerrIssueReporter.initialize();
-            if (typeof JE.initializePauseScreen === 'function') JE.initializePauseScreen();
-            if (typeof JE.initializeQualityTags === 'function' && JE.currentSettings?.qualityTagsEnabled) JE.initializeQualityTags();
-            if (typeof JE.initializeGenreTags === 'function' && JE.currentSettings?.genreTagsEnabled) JE.initializeGenreTags();
-            if (typeof JE.initializeRatingTags === 'function' && JE.currentSettings?.ratingTagsEnabled) JE.initializeRatingTags();
-            if (typeof JE.initializeArrLinksScript === 'function' && JE.pluginConfig?.ArrLinksEnabled) JE.initializeArrLinksScript();
-            if (typeof JE.initializeArrTagLinksScript === 'function' && JE.pluginConfig?.ArrTagsShowAsLinks) JE.initializeArrTagLinksScript();
-            if (typeof JE.initializeLetterboxdLinksScript === 'function' && JE.pluginConfig?.LetterboxdEnabled) JE.initializeLetterboxdLinksScript();
-            if (typeof JE.initializeReviewsScript === 'function' && JE.pluginConfig?.ShowReviews) JE.initializeReviewsScript();
-            if (typeof JE.initializeLanguageTags === 'function' && JE.currentSettings?.languageTagsEnabled) JE.initializeLanguageTags();
-            if (typeof JE.initializeOsdRating === 'function') JE.initializeOsdRating();
-
-            console.log('🪼 Jellyfin Enhanced: All components initialized successfully.');
-
-            // Final Stage: Hide splash screen
-            if (typeof JE.hideSplashScreen === 'function') {
-                JE.hideSplashScreen();
-            }
+            console.log('🪼 Jellyfin Enhanced: Initialization complete.');
 
         } catch (error) {
             console.error('🪼 Jellyfin Enhanced: CRITICAL INITIALIZATION FAILURE:', error);
-             if (typeof JE.hideSplashScreen === 'function') {
-                JE.hideSplashScreen();
-            }
         }
     }
 
-    // Load splash screen immediately (before main initialization)
-    loadSplashScreenEarly();
-
-    // Then start main initialization
+    // Start main initialization
     initialize();
 
 })();
